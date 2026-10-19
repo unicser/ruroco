@@ -1,0 +1,151 @@
+name: Build multiplatform
+
+# Manual runs compile every target and upload them as workflow artifacts.
+# Tag pushes additionally attach the binaries to the GitHub Release.
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux:
+    name: Linux ${{ matrix.artifact }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            artifact: x86_64-linux
+            cross: false
+          - target: aarch64-unknown-linux-gnu
+            artifact: aarch64-linux
+            cross: true
+          - target: aarch64-unknown-linux-musl
+            artifact: aarch64-linux-musl
+            cross: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.cross
+        run: cargo install cross --locked
+
+      - name: Build client
+        run: ${{ matrix.cross && 'cross' || 'cargo' }} build --release --package ruroco --no-default-features --features with-vendored-openssl,with-client --bin client --target ${{ matrix.target }}
+
+      - name: Build client_ui
+        run: ${{ matrix.cross && 'cross' || 'cargo' }} build --release --package ruroco --no-default-features --features with-vendored-openssl,with-gui --bin client_ui --target ${{ matrix.target }}
+
+      - name: Build server
+        run: ${{ matrix.cross && 'cross' || 'cargo' }} build --release --package ruroco --no-default-features --features with-vendored-openssl,with-server --bin server --target ${{ matrix.target }}
+
+      - name: Build commander
+        run: ${{ matrix.cross && 'cross' || 'cargo' }} build --release --package ruroco --no-default-features --features with-vendored-openssl,with-commander --bin commander --target ${{ matrix.target }}
+
+      - name: Strip (musl)
+        if: endsWith(matrix.target, '-musl')
+        run: |
+          sudo docker run --rm \
+            -v "$PWD/target/${{ matrix.target }}/release:/workspace" \
+            ghcr.io/cross-rs/${{ matrix.target }}:0.2.5 \
+            aarch64-linux-musl-strip /workspace/client /workspace/client_ui /workspace/server /workspace/commander
+
+      - name: Collect binaries
+        run: |
+          mkdir -p out
+          cp "target/${{ matrix.target }}/release/client"     "out/client-${{ matrix.artifact }}"
+          cp "target/${{ matrix.target }}/release/client_ui"  "out/client-ui-${{ matrix.artifact }}"
+          cp "target/${{ matrix.target }}/release/server"     "out/server-${{ matrix.artifact }}"
+          cp "target/${{ matrix.target }}/release/commander"  "out/commander-${{ matrix.artifact }}"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ruroco-${{ matrix.artifact }}
+          path: out/
+          if-no-files-found: error
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          mkdir -p rel
+          for f in out/*; do
+            cp "$f" "rel/$(basename "$f")-${TAG}"
+          done
+          gh release upload "$TAG" rel/* --clobber
+
+  macos:
+    name: macOS ${{ matrix.artifact }}
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            artifact: aarch64-macos
+          - target: x86_64-apple-darwin
+            artifact: x86_64-macos
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build client
+        run: cargo build --release --package ruroco --no-default-features --features with-vendored-openssl,with-client --bin client --target ${{ matrix.target }}
+
+      - name: Build client_ui
+        run: cargo build --release --package ruroco --no-default-features --features with-vendored-openssl,with-gui --bin client_ui --target ${{ matrix.target }}
+
+      - name: Build server
+        run: cargo build --release --package ruroco --no-default-features --features with-vendored-openssl,with-server --bin server --target ${{ matrix.target }}
+
+      - name: Build commander
+        run: cargo build --release --package ruroco --no-default-features --features with-vendored-openssl,with-commander --bin commander --target ${{ matrix.target }}
+
+      - name: Collect binaries
+        run: |
+          mkdir -p out
+          cp "target/${{ matrix.target }}/release/client"     "out/client-${{ matrix.artifact }}"
+          cp "target/${{ matrix.target }}/release/client_ui"  "out/client-ui-${{ matrix.artifact }}"
+          cp "target/${{ matrix.target }}/release/server"     "out/server-${{ matrix.artifact }}"
+          cp "target/${{ matrix.target }}/release/commander"  "out/commander-${{ matrix.artifact }}"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ruroco-${{ matrix.artifact }}
+          path: out/
+          if-no-files-found: error
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          mkdir -p rel
+          for f in out/*; do
+            cp "$f" "rel/$(basename "$f")-${TAG}"
+          done
+          gh release upload "$TAG" rel/* --clobber
